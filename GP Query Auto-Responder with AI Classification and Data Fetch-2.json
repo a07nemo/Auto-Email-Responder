@@ -1,0 +1,1538 @@
+{
+  "name": "GP Query Auto-Responder with AI Classification and Data Fetch",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gp-query-responder",
+        "options": {}
+      },
+      "id": "cbf5445b-7fb2-4833-89b3-96e6ccf0f502",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1888,
+        -256
+      ],
+      "webhookId": "e6912d90-d187-47bc-a4ae-db439b0ac090"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Subject: {{ $json.body.subject }}\n\nEmail Body:\n{{ $json.body.description }}\n\nThread Count: {{ $json.body.thread_count || '1' }}\n\nPrevious Conversation History:\n{{ $json.body.thread_history || 'No prior threads — this is a new ticket.' }}\n\nSender: {{ $json.body.contact_name }} ({{ $json.body.contact_email }})",
+        "options": {
+          "systemMessage": "You are a query parser for GroMo. GPs send email queries about their customers.\n\nExtract the GP's partner ID, lead ID, phone number, detect language, classify intent, and pick the correct ticket type.\n\nReturn ONLY valid JSON:\n{\n  \"gp_id\": \"<GP/partner ID if found, else null>\",\n  \"lead_id\": \"<Lead ID if found, else null>\",\n  \"phone\": \"<10-digit mobile number if found, else null>\",\n  \"language\": \"english\",\n  \"query_text\": \"<clean version of the GP's question>\",\n  \"intent\": \"<one of: wallet | leads | products | membership | profile | search_product | insurance | pos_noc | account_delete | agent_handled>\",\n  \"ticket_type\": \"<one of the ticket types listed below — copy EXACT spelling>\",\n  \"has_dispute\": <true if any dispute/claim language present, else false>,\n  \"has_attachment\": <true if email mentions attached documents, else false>\n}\n\n===============================================\nCRITICAL RULE FOR \"agent_handled\" — READ FIRST\n===============================================\n\"agent_handled\" is ONLY valid when ALL THREE are true:\n  1. thread_count is 2 or higher\n  2. thread_history is NOT empty\n  3. thread_history contains a sender email ending in \"@gromo.in\"\n\nIf any of these is false → intent MUST NOT be \"agent_handled\".\n\n===============================================\nLEAD ID EXTRACTION (CRITICAL — most failures happen here)\n===============================================\nLead IDs come in MANY formats. Look EVERYWHERE in the email (subject, body, thread history):\n\nFormat examples:\n- \"IF-HYSC8\" (two letters, dash, alphanumeric code)\n- \"ZD-4P3SO\" (note the letter O, not zero — preserve EXACTLY as written)\n- \"KT123456\" (brand prefix + 6-8 digits — KT=Kotak, TR=Tide, UP=Upstox, KO, AB, BL, AX, SB, HD, IC, BJ)\n- Subject pattern: \"Dispute Raised for {customer name}'s {product} - {LEADID}\" — Lead ID is at the end after the dash\n- Explicit labels: \"Lead ID:\", \"lead id is\", \"for lead\"\n\nRules:\n- Copy the Lead ID EXACTLY as written. Preserve casing, dashes, letter O vs digit 0.\n- Lead ID is DIFFERENT from GP ID. They have different formats. Extract both separately.\n- If you see a Lead ID anywhere in the conversation (even in older messages), extract it.\n- If multiple Lead IDs exist, extract the one the current query is about.\n\n===============================================\nINTENT CLASSIFICATION RULES\n===============================================\n- wallet: GENERAL wallet/balance/earnings, withdrawal, KYC, bank verification, annual fee, refer & earn, agency\n- leads: SPECIFIC lead status, payout for a specific product/customer, dispute, claim, sale not tracked, lead expired\n- products: Product catalog, commission rates, what to sell\n- membership: Protect membership/plan status, subscription\n- profile: GP profile, bank details change, personal info\n- search_product: SPECIFIC product by name (HDFC, ICICI, Bajaj)\n- insurance: ANY insurance query\n- pos_noc: POS verification, NOC, TDS document\n- account_delete: Delete/deactivate account\n\n===============================================\nJUNK / BLANK DETECTION (NEW — content-based)\n===============================================\nMark intent as \"junk\" and ticket_type as \"Blank Email/ Junk/ Test\" if email is:\n- Brand newsletter (mentions \"weekly digest\", \"this week in\", \"newsletter\", \"unsubscribe\")\n- Automated bank/financial alert (statement notifications, balance alerts)\n- Marketing email (offer expires, limited time, subscribe, promotional)\n- Empty body or only signature\n- Test email with no real content\n- Auto-responder (\"out of office\", \"vacation reply\")\n\n===============================================\nTICKET TYPE CLASSIFICATION — STRICT RULES\n===============================================\n\nCRITICAL: Do NOT default to \"Payout Syncing\" or \"L1_Queries\" unless you've ruled out everything else.\n\nPAYOUT & LEADS — pick the MOST specific:\n- \"Payout Status - Within 10 Days Of Lead Creation\" — lead is recent, GP asking when payout will come\n- \"Payout Status - After 10 Days Of Lead Creation\" — lead was created more than 10 working days ago, payout not received\n- \"Lead Expire\" — lead is mentioned as expired, past 30 days, brand didn't update\n- \"Lead syncing\" — lead doesn't appear in GP's app despite being submitted\n- \"Payout Syncing\" — ONLY for: \"sale not tracked\", \"payout not credited despite sale completion\", \"never showed up in wallet\"\n- \"Dispute Related\" / \"Protect disputes\" — GP raised a dispute, plan limit, claim status\n- \"Rejected\" — brand rejected the application (KYC fail, document mismatch)\n- \"Required Lead Details\" — GP asking for details/status of a specific lead\n- \"Workable Cases\" — GP asking which leads are still workable\n- \"Duplicate Email\" — duplicate lead, duplicate application\n\nWALLET & KYC:\n- \"Wallet Transfer Issue\" — transfer/withdrawal failing\n- \"Wallet Expire\" — wallet expired\n- \"Negative Payout Related\" — negative wallet balance\n- \"App Kyc Issue\" — KYC inside GroMo app\n- \"Brand Kyc Related\" — KYC for a specific brand\n- \"Refer And Earn\" / \"Refer And Earn Payout Related\"\n\nMEMBERSHIP:\n- \"GroMo Membership\" — membership plan questions\n- \"Protect related information\" — what Protect plan covers, how to buy\n- \"Protect disputes\" — dispute under Protect plan (USE THIS, not \"Dispute Related\", if Protect plan mentioned)\n- \"Income Express / Protect Deactivation\"\n\nPRODUCTS & BRANDS:\n- \"Loan\" / \"Credit Card\" / \"Demat\" / \"Saving Account\" / \"Subscription\" / \"Credit Pay Later\" / \"Investment\" / \"Insurance Lead Status\" / \"Others Brand\"\n\nAPP & ONBOARDING:\n- \"Unable To Use/Understand Gromo App\" / \"App Bugs\" / \"Start Working With Gromo\" / \"How To Create Lead\" / \"How To Open The Account\" / \"Unable To Share The Link/Proceed Further\" / \"IVRS Blocked\"\n\nOFFERS:\n- \"Scratch Card Enquiry\" / \"Offer/Scratch Card Related Dispute - Genuine Issue\" / \"Offer/Scratch Card Related Dispute - Gp Understanding Problem\" / \"Gromo Coins\" / \"Gromo Bazaar\" / \"Wants To Know About Current Offers\"\n\nPROFILE:\n- \"Details Modification / Detail Remove\"\n\nOTHER:\n- \"Agency Related Query\" / \"Training Related Query\" / \"Job Loss\" / \"General Query\" / \"Marketing Email\" / \"Did Not Explain Query\" / \"Insurance Related Information\"\n\nL2 (template reply, ticket stays open):\n- \"POS Related\" / \"TDS Document/NOC Certificate\" / \"Account Deactivation Request/Account Reactivate\" / \"Insurance Related Information\"\n\nJUNK: \"Blank Email/ Junk/ Test\"\n\nFALLBACK (use ONLY if nothing fits): \"L1_Queries\"\n\n===============================================\nDISPUTE OVERRIDES LEAD AGE\n===============================================\nIf the GP mentions ANY of these → ticket_type MUST be \"Protect Dispute\" or \"Protect disputes\", NOT a Payout Status type:\n- \"claim rejected\" / \"claim approved\" / \"claim raised\"\n- \"Protect plan\" / \"protect claim\"\n- \"plan limit reached\" / \"limit breached\" / \"limit exhausted\"\n- \"incorrect proof\" / \"re-upload\"\n- \"dispute documents\"\n\nDispute language ALWAYS wins over age-based language. Never combine \"your lead expired\" with \"dispute reason\" in classification.\n\n===============================================\nATTACHMENT FLAG\n===============================================\nSet has_attachment = true if email body mentions:\n- \"attached\", \"attachment\", \"please find\", \"PFA\"\n- \"screenshot\", \"image\", \"photo\"\n- \"bank statement\", \"document\", \"proof\"\n\nIf has_attachment is true, the auto-responder will skip the reply and route to L2 for human review.\n\n===============================================\nCOMMON MISTAKES TO AVOID\n===============================================\nThese phrases do NOT mean agent_handled:\n- \"As discussed over the call\"\n- \"As per our conversation\"\n- \"Following up on our chat\"\n- \"As we spoke earlier\"\n- \"Please find attached as discussed\"\n\nThese indicate offline/phone contact, NOT a prior agent email reply. \nUnless thread_history literally contains \"From: someone@gromo.in\" \nas a sender line, classify by email content.\n\nIf a GP sends an email with an attachment but no clear question, no \nGP ID, and no phone number — DO NOT classify as agent_handled. \nClassify based on what little content exists, or set intent to \n\"general\" with ticket_type \"Did Not Explain Query\". The downstream \nflow will ask the GP for their details.\n\n===============================================\nFINAL CHECK BEFORE RETURNING\n===============================================\n1. Verify Lead ID is copied character-for-character (especially letter O vs digit 0)\n2. Verify ticket_type is one of the EXACT strings above\n3. If you used \"Payout Syncing\" — confirm the GP literally said \"sale not tracked\" or \"not credited\"\n4. If you used \"L1_Queries\" — confirm NO other category fits at all\n5. If has_dispute is true and intent is \"leads\" — ticket_type MUST be a dispute-related type\n6. Never invent a new ticket_type value"
+        }
+      },
+      "id": "8ecbc52c-3156-4d88-a6d4-b906c39a1120",
+      "name": "Extract Ticket Information",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -1248,
+        -256
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "gpt-4o"
+        },
+        "responsesApiEnabled": "={{ true }}",
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "3aa91c13-f8c4-4015-b1ab-13fdc675bb33",
+      "name": "OpenAI Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -448,
+        -496
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "kNsBxdH8pZfoz19c",
+          "name": "OpenAi account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.output || $input.first().json.text || '';\nconst description = $node['Webhook Trigger'].json.body?.description || '';\nconst threadHistory = $node['Webhook Trigger'].json.body?.thread_history || '';\nconst subject = $node['Webhook Trigger'].json.body?.subject || '';\nconst emailBody = [subject, description, threadHistory].filter(Boolean).join('\\n---\\n');\n\nlet parsed = { gp_id: null, phone: null, language: \"english\", query_text: raw, intent: \"general\", ticket_type: \"L1_Queries\" };\ntry {\n  const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();\n  const jsonMatch = cleaned.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    parsed = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {}\n\n// Debug fields — always populated\nparsed.override_triggered = false;\nparsed.override_reason = null;\nparsed.gpt_original_intent = parsed.intent;\n\n// GP ID regex\nconst gpPatterns = [\n  /GP\\s*(?:ID|id|Id)\\s*[:\\-\\s]+([A-Za-z0-9]+)/i,\n  /GP\\s*id\\s+is\\s+([A-Za-z0-9]+)/i,\n  /main\\s+([A-Z][A-Z0-9]{5,10})\\s+hoon/i,\n  /\\b([A-Z]\\d[A-Z][A-Z]\\d{4})\\b/,\n  /\\b([A-Z]{1,2}\\d[A-Z]{1,2}\\d{4,5})\\b/\n];\nfor (const p of gpPatterns) {\n  const m = emailBody.match(p);\n  if (m && m[1] && m[1].length >= 6) { parsed.gp_id = m[1]; break; }\n}\nconst phoneMatch = emailBody.match(/\\b([6-9]\\d{9})\\b/);\nif (phoneMatch) parsed.phone = phoneMatch[1];\n\n// ============================================\n// AGENT_HANDLED override — tightened\n// ============================================\nif (parsed.intent === 'agent_handled') {\n  const th = threadHistory;\n  const tc = parseInt($node['Webhook Trigger'].json.body?.thread_count || '0');\n\n  // Require an actual sender line with @gromo.in, not just substring anywhere\n  const hasGromoSender = /from:\\s*[^\\n]*@gromo\\.in/i.test(th) ||\n                         /<[a-z0-9._-]+@gromo\\.in>/i.test(th);\n\n  if (tc < 2 || !hasGromoSender) {\n    parsed.override_triggered = true;\n    parsed.override_reason = tc < 2\n      ? `thread_count=${tc} (need >=2)`\n      : 'no From: @gromo.in sender line found in thread_history';\n\n    const q = (parsed.query_text || emailBody).toLowerCase();\n\n    // Specific intent matches first\n    if (q.match(/insurance|bima|posp|motor|life insurance|health insurance/)) parsed.intent = 'insurance';\n    else if (q.match(/pos\\s+verification|pos\\s+failure|noc/)) parsed.intent = 'pos_noc';\n    else if (q.match(/delete\\s+account|deactivate|close\\s+my\\s+account|account\\s+band/)) parsed.intent = 'account_delete';\n    else if (q.match(/protect\\s+plan|protect\\s+membership|gromo\\s+protect/)) parsed.intent = 'membership';\n    else if (q.match(/lead|payout|pending\\s+lead|expired\\s+lead|dispute|claim|sale\\s+not\\s+tracked/)) parsed.intent = 'leads';\n    else if (q.match(/hdfc|icici|bajaj|kotak|upstox|tide|axis|sbi/)) parsed.intent = 'search_product';\n    else if (q.match(/profile|bank\\s+detail/)) parsed.intent = 'profile';\n    else if (q.match(/wallet|balance|deducted|withdraw|kyc|earning/)) parsed.intent = 'wallet';\n    // No keyword matched AND no identifiers → let Ask Info branch handle it\n    else if (!parsed.gp_id && !parsed.phone) {\n      parsed.intent = 'general';\n      parsed.ticket_type = 'Did Not Explain Query';\n    }\n    else parsed.intent = 'wallet';  // last resort: identifiers exist but no keywords matched\n  }\n}\n\n// ============================================\n// TICKET TYPE validation + fallback\n// ============================================\nconst VALID_TYPES = new Set([\n  \"Lead syncing\",\"Payout Syncing\",\"Rejected\",\"Workable Cases\",\"Blank Email/ Junk/ Test\",\n  \"GroMo Membership\",\"Protect related information\",\"Protect disputes\",\n  \"Unable To Use/Understand Gromo App\",\"Offer/Scratch Card Related Dispute - Genuine Issue\",\n  \"App Kyc Issue\",\"Account Deactivation Request/Account Reactivate\",\n  \"Details Modification / Detail Remove\",\"App Bugs\",\"Start Working With Gromo\",\n  \"How To Create Lead\",\"How To Open The Account\",\"Unable To Share The Link/Proceed Further\",\n  \"Brand Kyc Related\",\"Agency Related Query\",\"Training Related Query\",\"Refer And Earn\",\n  \"Loan\",\"Credit Card\",\"Job Loss\",\"Demat\",\"Saving Account\",\"Subscription\",\n  \"Credit Pay Later\",\"Investment\",\"Others Brand\",\"POS Related\",\"Insurance Lead Status\",\n  \"Payout Status - Within 10 Days Of Lead Creation\",\"Payout Status - After 10 Days Of Lead Creation\",\n  \"Lead Expire\",\"Dispute Related\",\"Wallet Transfer Issue\",\"Negative Payout Related\",\n  \"2nd Kpi Payout Related\",\"Refer And Earn Payout Related\",\"Duplicate Email\",\n  \"Did Not Explain Query\",\"TDS Document/NOC Certificate\",\"IVRS Blocked\",\"General Query\",\n  \"Marketing Email\",\"Insurance Related Information\",\"Wants To Know About Current Offers\",\n  \"Scratch Card Enquiry\",\"Offer/Scratch Card Related Dispute - Gp Understanding Problem\",\n  \"Required Lead Details\",\"Gromo Coins\",\"Gromo Bazaar\",\"Wallet Expire\",\n  \"Income Express / Protect Deactivation\",\"L1_Queries\"\n]);\n\n// Intent-based fallback if GPT gave invalid value\nconst INTENT_FALLBACK = {\n  insurance: \"Insurance Related Information\",\n  pos_noc: \"POS Related\",\n  account_delete: \"Account Deactivation Request/Account Reactivate\",\n  wallet: \"General Query\",\n  leads: \"Payout Syncing\",\n  products: \"General Query\",\n  membership: \"Protect related information\",\n  profile: \"Details Modification / Detail Remove\",\n  search_product: \"Others Brand\",\n  agent_handled: \"L1_Queries\",\n  general: \"Did Not Explain Query\"\n};\n\nif (!parsed.ticket_type || !VALID_TYPES.has(parsed.ticket_type)) {\n  parsed.ticket_type = INTENT_FALLBACK[parsed.intent] || \"L1_Queries\";\n}\n\n// Force L2 types if intent is L2, regardless of what GPT said\nif (parsed.intent === 'insurance' && parsed.ticket_type !== \"Insurance Related Information\") {\n  parsed.ticket_type = \"Insurance Related Information\";\n}\nif (parsed.intent === 'pos_noc') {\n  const q = (parsed.query_text || emailBody).toLowerCase();\n  parsed.ticket_type = q.includes('noc') || q.includes('tds') ? \"TDS Document/NOC Certificate\" : \"POS Related\";\n}\nif (parsed.intent === 'account_delete') {\n  parsed.ticket_type = \"Account Deactivation Request/Account Reactivate\";\n}\n\n// Debug summary for execution log\nparsed._debug = {\n  thread_count: parseInt($node['Webhook Trigger'].json.body?.thread_count || '0'),\n  thread_history_length: threadHistory.length,\n  thread_history_has_gromo_substring: threadHistory.toLowerCase().includes('@gromo.in'),\n  thread_history_has_gromo_sender: /from:\\s*[^\\n]*@gromo\\.in/i.test(threadHistory) ||\n                                   /<[a-z0-9._-]+@gromo\\.in>/i.test(threadHistory),\n  override_triggered: parsed.override_triggered,\n  override_reason: parsed.override_reason,\n  gpt_original_intent: parsed.gpt_original_intent,\n  final_intent: parsed.intent\n};\n\nreturn [{ json: { output: parsed } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        -112
+      ],
+      "id": "1e007ac5-5a26-46bb-abeb-5c19dc4cd2c8",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.output.gp_id }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              },
+              "rightValue": "",
+              "id": "cond-gpid"
+            },
+            {
+              "leftValue": "={{ $json.output.phone }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              },
+              "rightValue": "",
+              "id": "cond-phone"
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "2fb98e08-5201-46ec-9a76-f4c524b51b80",
+      "name": "Has GP ID or Phone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -512,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const output = $input.first().json.output;\n\nif (output.gp_id) {\n  return [{ json: { output: output } }];\n}\n\nif (output.phone) {\n  try {\n    const profileResp = await this.helpers.httpRequest({\n      method: 'GET',\n      url: 'https://api.gromo.in/api/v5/gp/profile-details?phone=' + output.phone,\n      headers: {\n        'clientid': 'karta',\n        'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6'\n      }\n    });\n    if (profileResp && profileResp.data && profileResp.data.gpuid) {\n      output.gp_id = profileResp.data.gpuid;\n    }\n  } catch (e) {\n    // Lookup failed - phone will still be passed to APIs directly\n  }\n}\n\n// output.phone is always preserved so downstream nodes can use it\nreturn [{ json: { output: output } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        -256
+      ],
+      "id": "a001bf1a-e702-4188-8fcf-f40b5a212407",
+      "name": "Lookup GP by Phone"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "wallet",
+                    "id": "sw-wallet"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "wallet"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "leads",
+                    "id": "sw-leads"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "leads"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "products",
+                    "id": "sw-products"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "products"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "membership",
+                    "id": "sw-membership"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "membership"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "profile",
+                    "id": "sw-profile"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "profile"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "search_product",
+                    "id": "sw-search"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "search_product"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "insurance",
+                    "id": "sw-insurance"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "insurance"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "pos_noc",
+                    "id": "sw-pos-noc"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pos_noc"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "account_delete",
+                    "id": "sw-account-delete"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "account_delete"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.intent }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "agent_handled",
+                    "id": "sw-agent-handled"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "agent_handled"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "123a8179-2134-47c4-941d-968b5fc40ca8",
+      "name": "Route by Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -160,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.gromo.in/api/v5/walletHomeScreenSummary",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"gpuid\": \"{{ $json.output.gp_id || '' }}\", \"phone\": \"{{ $json.output.phone || '' }}\"}",
+        "options": {}
+      },
+      "id": "88af8e5a-e8fc-43af-878c-118a6038d912",
+      "name": "Fetch Wallet Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        -560
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://api.gromo.in/api/v5/manageLeadsOptimized",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "gpuid",
+              "value": "={{ $json.output.gp_id }}"
+            },
+            {
+              "name": "phone",
+              "value": "={{ $json.output.phone || '' }}"
+            },
+            {
+              "name": "leadType",
+              "value": "others"
+            },
+            {
+              "name": "pageNumber",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9ab70a6a-c814-42bd-959e-c68b365db734",
+      "name": "Fetch Leads Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        -352
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.gromo.in/api/v5/productsForGp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"gpuid\": \"{{ $json.output.gp_id || '' }}\", \"phone\": \"{{ $json.output.phone || '' }}\"}",
+        "options": {}
+      },
+      "id": "8dd30f6e-6461-4613-9550-bf1762549708",
+      "name": "Fetch Products Catalog",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        -160
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://api.gromo.in/api/v5/user/memberships",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "gpuid",
+              "value": "={{ $json.output.gp_id }}"
+            },
+            {
+              "name": "phone",
+              "value": "={{ $json.output.phone || '' }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9a469bf0-1567-4237-8a5e-21277a6806b0",
+      "name": "Fetch Membership Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        64
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://api.gromo.in/api/v5/gp/profile-details",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "gpuid",
+              "value": "={{ $json.output.gp_id }}"
+            },
+            {
+              "name": "phone",
+              "value": "={{ $json.output.phone || '' }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "68b3a1d1-c1fa-4bd6-b8cf-1c8a8d68d8b9",
+      "name": "Fetch GP Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        256
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.gromo.in/api/v5/productsForGp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "clientid",
+              "value": "karta"
+            },
+            {
+              "name": "secretkey",
+              "value": "7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"gpuid\": \"{{ $json.output.gp_id || '' }}\", \"phone\": \"{{ $json.output.phone || '' }}\", \"productName\": \"{{ $json.output.query_text }}\"}",
+        "options": {}
+      },
+      "id": "97aa2f19-da61-49ba-a654-23b90796a382",
+      "name": "Search Specific Product",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        128,
+        464
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -560
+      ],
+      "id": "3d7fd197-b4ef-4541-8d64-833265249dfb",
+      "name": "Wallet Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -352
+      ],
+      "id": "f7664dfe-2408-4c79-a37d-33c9d7ac88af",
+      "name": "Leads Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -160
+      ],
+      "id": "1600b37d-50ba-4353-97c9-769a5a86a6c0",
+      "name": "Products Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        64
+      ],
+      "id": "dc976c24-efcd-4ca3-b987-d37a83632f88",
+      "name": "Membership Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        256
+      ],
+      "id": "69f25d84-5aa6-4e8f-a585-f747a2733807",
+      "name": "Profile Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nif (input && !input.error && !input.errorMessage && (input.success || input.data || input.leads || input.wallet || input.membership || input.products || input._id)) {\n  return [{ json: { api_data: input, fallback_used: false } }];\n}\n\nconst gpId = $node['Code in JavaScript1'].json.output.gp_id || '';\nconst phone = $node['Code in JavaScript1'].json.output.phone || '';\nconst queryText = $node['Code in JavaScript1'].json.output.query_text;\n\nlet chatUrl = 'https://api.gromo.in/api/v5/guru/do/chat';\nif (gpId) {\n  chatUrl += '?gpuid=' + gpId;\n} else if (phone) {\n  chatUrl += '?phone=' + phone;\n}\n\ntry {\n  const chatResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: chatUrl,\n    headers: { 'Content-Type': 'application/json', 'clientid': 'karta', 'secretkey': '7f9c3e2b8a4d1f6e9a0c5b2d8e7f4a1c9b6e0d3a5f8c2b4e7a9d1f6' },\n    body: { query: queryText }\n  });\n  return [{ json: { api_data: null, fallback_used: true, chat_response: chatResponse.data?.response || chatResponse.response || 'Unable to fetch details.' } }];\n} catch (e) {\n  return [{ json: { api_data: null, fallback_used: true, chat_response: 'We are currently unable to fetch your details. Please try again later or contact support.' } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        464
+      ],
+      "id": "6bc93024-7bab-4dc4-a0dd-f7434c63c3d5",
+      "name": "Search Fallback"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst queryText = $node['Code in JavaScript1'].json.output.query_text || '';\n\nif (input.fallback_used) {\n  return [{ json: input }];\n}\n\nconst apiData = input.api_data || input;\nlet leads = [];\n\nif (apiData.data && Array.isArray(apiData.data)) {\n  leads = apiData.data;\n} else if (apiData.leads && Array.isArray(apiData.leads)) {\n  leads = apiData.leads;\n} else if (Array.isArray(apiData)) {\n  leads = apiData;\n}\n\nconst today = new Date();\nconst enrichedLeads = leads.map(lead => {\n  const createdAt = new Date(lead.createdAt || lead.created_at || lead.createdDate);\n  let workingDays = 0;\n\n  if (!isNaN(createdAt.getTime())) {\n    const current = new Date(createdAt);\n    while (current < today) {\n      current.setDate(current.getDate() + 1);\n      const day = current.getDay();\n      if (day !== 0 && day !== 6) {\n        workingDays++;\n      }\n    }\n  }\n\n  let leadAgeCategory = 'unknown';\n  const totalDays = Math.floor((today - new Date(lead.createdAt || lead.created_at || lead.createdDate)) / (1000 * 60 * 60 * 24));\n\n  if (totalDays > 30) {\n    leadAgeCategory = 'EXPIRED_OVER_30_DAYS';\n  } else if (workingDays < 10) {\n    leadAgeCategory = 'LESS_THAN_10_WORKING_DAYS';\n  } else {\n    leadAgeCategory = 'MORE_THAN_10_WORKING_DAYS';\n  }\n\n  // Dispute surfacing: make the AI unable to miss protect/dispute context\n  const protectStatus = lead.protectLeadStatus || lead.disputeStatus || lead.claimStatus || '';\n  const disputeReasonRaw = lead.displayText || lead.rejectionReason || lead.disputeReason || '';\n  const hasDispute = !!(protectStatus || disputeReasonRaw);\n  const isLimitExhausted = /limit|quota|exhaust|breach/i.test(disputeReasonRaw) ||\n                           /limit|quota|exhaust|breach/i.test(protectStatus);\n\n  return {\n    ...lead,\n    _workingDaysSinceCreation: workingDays,\n    _totalDaysSinceCreation: totalDays,\n    _leadAgeCategory: leadAgeCategory,\n    _hasDispute: hasDispute,\n    _protectStatus: protectStatus,\n    _disputeReason: disputeReasonRaw,\n    _isLimitExhausted: isLimitExhausted\n  };\n});\n\nreturn [{ json: { api_data: { data: enrichedLeads }, fallback_used: false, working_days_calculated: true } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        -352
+      ],
+      "id": "9e32c1df-2d47-4cb1-b189-e0ee2115df8b",
+      "name": "Calculate Lead Age"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=GP Name: {{ $node['Webhook Trigger'].json.body.contact_name }}\nOriginal Query: {{ $node['Webhook Trigger'].json.body.subject }} - {{ $node['Webhook Trigger'].json.body.description }}\nThread History (previous replies): {{ $node['Webhook Trigger'].json.body.thread_history || 'None — new ticket' }}\nLanguage: {{ $node['Code in JavaScript1'].json.output.language }}\n\nFallback Used: {{ $json.fallback_used }}\nAPI Data: {{ $json.api_data ? JSON.stringify($json.api_data) : 'null' }}\nChat Fallback Response: {{ $json.chat_response || 'none' }}\n\nApply the correct decision logic and generate a reply.",
+        "options": {
+          "systemMessage": "You are a formal email support assistant for GroMo Partner Support. You receive either wallet API data or a fallback chat response, along with the GP's original query.\n\nCHECK FIRST: Look at the input data.\n- If fallback_used is false: use api_data and apply the WALLET DECISION LOGIC below.\n- If fallback_used is true: use chat_response as the basis for your reply. Format it professionally following the REPLY FORMAT RULES at the bottom.\n\nPAYOUT OVERVIEW:\nPayout = commission credited to GP's GroMo Wallet when a lead meets all activation and brand confirmation conditions. All payout is wallet-based not direct to bank.\n\nHow Payout Works:\n1. Lead Completed (Customer Account/Product Opened)\n2. Customer Completes Brand-Specific Mandatory Actions (Savings: full account opening. Tide: first deposit Rs 50. Demat: account open + at least one trade)\n3. Brand Confirmation and Status Update\n4. Payout credited to GroMo Wallet\n5. User may withdraw once wallet meets minimum balance\n\nTimeline: 10 working days after activation (excluding weekends and holidays).\n\nWALLET DECISION LOGIC (use when fallback_used is false):\n\nIF wallet balance is negative:\nReply: Due to the expiration policy, your wallet balance is visible as negative. As per policy, all wallet balances must be withdrawn within 3 months to avoid automatic expiration. The minimum withdrawal amount is Rs 500. We encourage you to continue selling products to increase your earnings and reach the minimum threshold.\n\nIF user asks about payout status and wallet shows pending payouts:\nReply: Your payout is currently being processed. Most products take 10 working days after activation (excluding weekends and holidays) for payout to be credited to your wallet. Please wait for the brand confirmation.\n\nIF user asks about withdrawal and balance is below minimum:\nReply: The minimum withdrawal amount is Rs 500. Your current wallet balance is [amount from API]. Please continue selling to reach the withdrawal threshold.\n\nIF user asks about earnings or balance:\nPresent the wallet summary data naturally showing current balance, lifetime earnings.\n\nIF user reports lower payout than shown in App:\nReply: This concern requires review by our senior team. We are escalating this to ensure it is addressed correctly. You will receive an update shortly.\n\nIF user asks general payout timeline:\nReply: Payout is credited to your GroMo Wallet within 10 working days after activation. Working days exclude Saturdays, Sundays and bank holidays. Once credited, you can withdraw from your wallet.\n\nKYC AND WALLET RULES:\n\nIF user asks when they can do KYC:\nReply: For first-time KYC, your wallet must have a minimum balance of Rs 400. If you have already completed KYC before, Re-KYC requires a minimum Rs 100 balance. For KYC, you only need to verify your Bank and PAN details.\n\nIF user says bank is not getting verified:\nReply: Please go to Edit Profile and then the Bank Verification section to add your bank account. The Gromo app provides 4 attempts for self-KYC. If all 4 attempts fail, you will need to upload documents to verification support. Please ensure that your Bank and PAN details are correct and the name on your PAN card matches the name on your bank account.\n\nIF user says wallet transfer is not working:\nReply: To transfer from your Gromo wallet, you need a minimum balance of Rs 100 and the first transfer must be at least Rs 399. If you are still facing errors after meeting both conditions, please create a screen recording of the error and share it with Gromo support at contact@gromo.in. Our team will verify the issue and provide an update within 24 working hours.\n\nIF user asks about annual fee:\nReply: When you are at the Silver level, you are required to pay an annual fee of Rs 299. This annual fee applies every year until your level is upgraded from Silver to Gold. To waive the membership fee, you need to upgrade your level by earning Rs 5,000 to move into the Gold category.\n\nIF user asks about Refer and Earn:\nReply: With the GroMo Referral Programme, you can earn up to Rs 10,000. When your referred Partner makes their first customer sale within 7 days, you receive Rs 100. When they achieve Gold status, you earn Rs 1,000. Platinum gives Rs 1,500 and Elite gives Rs 7,400. Condition: The referred Partner must earn a minimum of Rs 5,000 from brand sales.\n\nIF user asks about Agency:\nReply: To work in an Agency, you need a team of at least 10 people, a DSA code, and you must sell at least 50 Credit Card Products per month. You can fill the Agency Partner Form by going to Profile Page and clicking on My Agency option in the Gromo App. Registration fee is Rs 9,999.\n\nREPLY FORMAT RULES (apply to ALL replies):\n- Always reply in English only\n- Start with Dear [name] or Dear GroMo Partner\n- End with: If you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n- Plain text only, no markdown, no bold, no asterisks\n- No subject line, body text only\n- Never mention system, API, automation, fallback or internal tools\n- Do not make up data. Only use what is provided in the input."
+        }
+      },
+      "id": "2abff73f-8b03-42c3-bb15-7edbd7dd761d",
+      "name": "Reply Payout Wallet",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        672,
+        -560
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=GP Name: {{ $node['Webhook Trigger'].json.body.contact_name }}\nOriginal Query: {{ $node['Webhook Trigger'].json.body.subject }} - {{ $node['Webhook Trigger'].json.body.description }}\nThread History (previous replies in this ticket):\n{{ $node['Webhook Trigger'].json.body.thread_history || 'None — new ticket' }}\nLanguage: {{ $node['Code in JavaScript1'].json.output.language }}\n\nFallback Used: {{ $json.fallback_used }}\nAPI Data: {{ $json.api_data ? JSON.stringify($json.api_data) : 'null' }}\nChat Fallback Response: {{ $json.chat_response || 'none' }}\n\nApply the Payout Delay SOP and Lead Lifecycle logic. If thread history is not empty, this is a follow-up — maintain continuity, don't repeat info already given, and don't ask for info the GP already provided in the thread.\nLead ID: {{ $node['Code in JavaScript1'].json.output.lead_id || 'NOT PROVIDED' }}\nHas Dispute Flag (from code): {{ $node['Code in JavaScript1'].json.output.has_dispute }}\n\nCRITICAL: If \"Has Dispute Flag\" is true, use ONLY dispute-related response templates from the SOP. Do NOT mention lead expiry or 30-day validity. Dispute logic overrides age logic.\n\nIf Lead ID is \"NOT PROVIDED\", ask the GP to share their Lead ID before proceeding.",
+        "options": {
+          "systemMessage": "===============================================\nABSOLUTE RULE — READ BEFORE EVERYTHING ELSE\n===============================================\nDispute status ALWAYS overrides lead age. If _hasDispute is true, you must use ONLY the matching DISPUTE PATH template.\n\nDO NOT combine dispute language with age-based language. For example:\n- WRONG: The Protect Claim was rejected due to the plan limit being breached, and this lead is expired past 30 days so payout is not possible.\n- CORRECT: Your Protect Plan dispute limit for this cycle has already been reached, and therefore this particular claim could not be processed under the plan.\n\nIf _isLimitExhausted is true, this is PLAN LIMIT EXHAUSTION — a different issue from lead expiration. Never tell the GP their lead expired when the real reason is plan limit exhaustion.\n\nIf _hasDispute is true, do NOT mention lead validity, 30-day rule, or expiration at all in the reply. Use only the dispute template.\n\n===============================================\n\nYou are a formal email support assistant for GroMo Partner Support. You receive either leads API data or a fallback chat response, along with the GP's original query.\n\nCHECK FIRST: Look at the input data.\n- If fallback_used is false: use api_data and apply the LEAD DECISION LOGIC below.\n- If fallback_used is true: use chat_response as the basis for your reply. Format it professionally following the REPLY FORMAT RULES at the bottom.\n\nCRITICAL: Working days have been pre-calculated. Each lead in api_data has these fields:\n- _workingDaysSinceCreation\n- _totalDaysSinceCreation\n- _leadAgeCategory: EXPIRED_OVER_30_DAYS | LESS_THAN_10_WORKING_DAYS | MORE_THAN_10_WORKING_DAYS\n- _hasDispute: true if protect/dispute fields present\n- _protectStatus: raw dispute status string\n- _disputeReason: reason text from brand or system\n- _isLimitExhausted: true if dispute reason mentions plan limit / quota / exhaustion / breach\n\nDO NOT calculate working days yourself.\n\n=====================================================================\nSTEP 1 — Identify the matching lead by product or customer name from the query.\n=====================================================================\n\n=====================================================================\nSTEP 2 — DISPUTE STATUS HAS PRIORITY. Check _hasDispute FIRST.\n=====================================================================\nIf _hasDispute is true, apply the DISPUTE PATHS below. Do NOT fall back to PATH A/B/C based on lead age — the dispute outcome is the authoritative status.\n\nDISPUTE PATH 1 — Plan Limit Exhausted / Breached (_isLimitExhausted is true):\nReply: We checked the lead for [customer name]'s [product] application created on [date]. Your Protect Plan dispute limit for this cycle has already been reached, and therefore this particular claim could not be processed under the plan. The dispute allowance resets with the next plan cycle. Please note that for leads already past 30 days of creation, independent payouts are only possible if the brand confirms the sale directly.\n\nDISPUTE PATH 2 — Protect Claim Approved:\nReply: Your dispute claim for [customer name]'s [product] has been approved. The payout amount will be credited to your GroMo Wallet within 24 working hours.\n\nDISPUTE PATH 3 — Protect Claim Rejected (non-limit reason):\nReply: Your dispute claim for [customer name]'s [product] has been reviewed, and unfortunately the claim was rejected. Reason as per the brand: [_disputeReason]. If you have the correct supporting documents, you can re-upload them through the Leads section in the app. If the re-upload limit has been reached, please reply to this email with your GP ID, Customer Name, Lead ID, Product Name, and attach the required proof.\n\nDISPUTE PATH 4 — Protect Claim Raised / Under Review:\nReply: Your dispute raised under the GroMo Protect Plan for [customer name]'s [product] is currently under review. The concerned team is working on your request, and the status will be updated within 5 to 7 working days.\n\nDISPUTE PATH 5 — Rejected due to Suspicious Activity:\nReply: Your claim has been rejected due to suspicious activity detected on this lead. Please note that if any fraudulent activity is found, it may lead to the permanent suspension of your GroMo account.\n\n=====================================================================\nSTEP 3 — Only if _hasDispute is false, use _leadAgeCategory to pick a PATH.\n=====================================================================\n\nPATH A — _leadAgeCategory = EXPIRED_OVER_30_DAYS (status not Success):\nReply: Please be informed that every lead has a validity of 30 days. If we do not get an update from the brand for the attribution within this time frame, the lead gets expired automatically. For such leads, a dispute would need to be raised within 30 days of lead creation. As this lead is already expired, the payout will not be possible. However, if we receive any update regarding the sale from the brand, you will be notified.\n\nPATH B — _leadAgeCategory = LESS_THAN_10_WORKING_DAYS:\nReply: Please be informed that the lead was created on [date] and after the successful completion of the requested procedure, the Brand confirms the status within 10 working days. Since it has not been 10 working days, we request you to please wait. The lead status will be updated shortly. If you wish to raise a dispute, you can do so by uploading the relevant documents. Please note that your first dispute claim will be free of charge under this plan. (Note: If any suspicious activity is detected regarding Protect disputes, it may lead to the permanent suspension of your GroMo account.)\n\nPATH C — _leadAgeCategory = MORE_THAN_10_WORKING_DAYS (status still Pending):\nReply: Please be informed that we generally receive feedback from the brand within 10 working days after the requested process is completed. Since more than 10 working days have passed without any update regarding your lead, we suggest that you raise a dispute. To raise a dispute, you need to activate the GroMo Protect Plan. This plan costs Rs 199 and allows you to dispute leads created after its activation. Please note that your first dispute claim will be free of charge under this plan. (Note: If any suspicious activity is detected regarding Protect disputes, it may lead to the permanent suspension of your GroMo account.)\n\nPATH D — Lead status is Success:\nReply: Great news! Your lead for [customer name]'s [product] has been successfully tracked and the payout has been processed. The commission amount will be credited to your GroMo Wallet.\n\nPATH E — Sale not tracked by brand:\nReply: GroMo depends on the brand's confirmation to process payouts. As per our follow-up with the brand, the brand was unable to track the sale associated with your customer, which is why the status has not been updated. We sincerely apologize for any inconvenience caused.\n\n=====================================================================\nPRODUCT-SPECIFIC KPIs\n=====================================================================\n- Savings Account: Account Opening + Funding\n- Credit Cards: Card Dispatch + Card Activation\n- Loans: Loan Disbursal\n- Demat Accounts: Account Opening + First Trade\n- Investment Accounts: Account Opening + Investment\n\n=====================================================================\n5 REASONS WHY LEAD MAY NOT BE TRACKED\n=====================================================================\n1. Customer was already known to the brand through advertisements or internet searches.\n2. Customer did not complete the process as per terms and conditions.\n3. Customer used a link from someone other than the GroMo partner.\n4. Customer used a referral code along with the GroMo link.\n5. Customer opened multiple accounts on the same mobile phone.\n\n=====================================================================\nREPLY FORMAT RULES\n=====================================================================\n- Always state the lead creation date before giving the status\n- If user asks about pending payout leads, do not mention leads with success status\n- Always reply in English only\n- Start with Dear [name] or Dear GroMo Partner\n- End with: If you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n- Plain text only, no markdown, no bold, no asterisks\n- No subject line, body text only\n- Never mention system, API, automation, fallback or internal tools\n- Do not make up data. Only use what is provided in the input.\n\n=====================================================================\nREPLY STRUCTURE\n=====================================================================\nWrite the reply like a human support agent would. Weave the lead data naturally into the response as flowing sentences. Do not list data as bullet points or labels.\n1. Greeting (Dear [name])\n2. Opening line acknowledging their query naturally\n3. Share what you found — customer name, product, lead creation date, and current status in flowing sentences. If a dispute reason exists, include it naturally (e.g. As per the brand update, the dispute was rejected because the plan limit for this cycle has been reached.)\n4. Explain what the status means in simple terms\n5. Give the solution based on the applicable PATH\n6. Closing\n\nEXAMPLE OF GOOD REPLY:\n\nDear Rahul Sharma,\n\nThank you for reaching out regarding your Kotak 811 lead.\n\nWe checked your lead for customer Priyanshi Sharma (Lead ID: VMHD-078TY). This lead was created on 1st April 2026 and is currently marked as Pending on Customer. As per the brand update, the customer still needs to complete the application process.\n\nSince more than 10 working days have passed without a status update from the brand, we recommend raising a dispute. To raise a dispute, you can activate the GroMo Protect Plan (Rs 199) from the app, which covers leads created after activation. Your first dispute claim is free of charge.\n\nIf you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n\nEXAMPLE OF BAD REPLY (do not do this):\n\nDear Rahul Sharma,\n\nCustomer Name: Priyanshi Sharma\nProduct: Kotak 811\nLead ID: VMHD-078TY\nStatus: Pending on Customer\nCreated: 1st April 2026\n\nSince more than 10 working days have passed...\n\n(This is bad because it reads like a data dump, not a human email.)\n"
+        }
+      },
+      "id": "b856b024-bd5a-44e9-a0a5-e0e38058f2c8",
+      "name": "Reply Payout Leads",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        672,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=GP Name: {{ $node['Webhook Trigger'].json.body.contact_name }}\nOriginal Query: {{ $node['Webhook Trigger'].json.body.subject }} - {{ $node['Webhook Trigger'].json.body.description }}\nThread History (previous replies): {{ $node['Webhook Trigger'].json.body.thread_history || 'None — new ticket' }}\nLanguage: {{ $node['Code in JavaScript1'].json.output.language }}\n\nFallback Used: {{ $json.fallback_used }}\nAPI Data: {{ $json.api_data ? JSON.stringify($json.api_data) : 'null' }}\nChat Fallback Response: {{ $json.chat_response || 'none' }}\n\nApply the Protect Membership SOP and generate a reply.",
+        "options": {
+          "systemMessage": "You are a formal email support assistant for GroMo Partner Support. You receive either membership API data or a fallback chat response, along with the GP's original query.\n\nCHECK FIRST: Look at the input data.\n- If fallback_used is false: use api_data and apply the PROTECT MEMBERSHIP LOGIC below.\n- If fallback_used is true: use chat_response as the basis for your reply. Format it professionally following the REPLY FORMAT RULES at the bottom.\n\nABOUT GROMO PROTECT:\nGroMo Protect is a paid monthly membership (Rs 199) designed to guarantee earnings for successful leads that were not correctly tracked or attributed. Validity is 30 days from activation date.\n\nPROTECT PLAN DETAILS:\n- Cost: Rs 199 per month\n- Validity: 30 days from activation\n- Coverage: Only leads created AFTER plan activation are covered\n- Free Claim: Every GP gets one free dispute claim without needing Protect\n- Claim Limit: Based on plan type\n\nHOW TO RAISE DISPUTE:\n1. Open the GroMo App\n2. Go to the Leads section\n3. Find the lead you want to dispute\n4. Click on Raise Dispute option\n5. Upload the required proof documents\n6. Submit the dispute\n\nDECISION LOGIC (use when fallback_used is false):\n\nIF user asks about Protect plan details:\nReply: GroMo Protect is a membership plan costing Rs 199 with 30 days validity. It covers leads created after plan activation. If a lead is not tracked by the brand, you can raise a dispute through the app. Your first dispute claim is free of charge.\n\nIF user has active Protect and asks about raising dispute:\nReply: Since you have an active GroMo Protect membership, you can directly go to the lead section in the app and use the Raise Dispute option. Please upload the required proof documents for faster resolution.\n\nIF user's Protect was purchased AFTER lead creation:\nReply: GroMo Protect covers only leads created after the membership activation date. The lead in question was created before your plan activation, so it is not covered under the plan. You can wait for confirmation from the brand side. The payout will be processed automatically once the brand updates the status.\n\nIF user has no Protect membership:\nReply: Currently, you do not have an active GroMo Protect plan. You can use your one-time Free Claim option from the app to raise a dispute for one lead. For future leads, we recommend activating the GroMo Protect Plan (Rs 199) so that you can raise disputes for leads that are not tracked.\n\nIF user asks about Protect cancellation or refund:\nReply: The GroMo Protect plan is non-refundable once activated. The plan is valid for 30 days from the date of activation.\n\nIF free claim already used and no active plan:\nReply: As per our records, you have already used your one-time Free Claim. To raise any further disputes, you must have an active Protect membership. The plan costs Rs 199 and is valid for 30 days. Only leads created after plan activation are eligible for dispute.\n\nREPLY FORMAT RULES (apply to ALL replies):\n- Always reply in English only\n- Start with Dear [name] or Dear GroMo Partner\n- End with: If you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n- Plain text only, no markdown, no bold, no asterisks\n- No subject line, body text only\n- Never mention system, API, automation, fallback or internal tools"
+        }
+      },
+      "id": "8edcecbe-d09b-44b2-a340-05e184c8b317",
+      "name": "Reply Protect Membership",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        672,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=GP Name: {{ $node['Webhook Trigger'].json.body.contact_name }}\nOriginal Query: {{ $node['Webhook Trigger'].json.body.subject }} - {{ $node['Webhook Trigger'].json.body.description }}\nThread History (previous replies): {{ $node['Webhook Trigger'].json.body.thread_history || 'None — new ticket' }}\nLanguage: {{ $node['Code in JavaScript1'].json.output.language }}\n\nFallback Used: {{ $json.fallback_used }}\nAPI Data: {{ $json.api_data ? JSON.stringify($json.api_data) : 'null' }}\nChat Fallback Response: {{ $json.chat_response || 'none' }}\n\nGenerate a reply based on the data above.",
+        "options": {
+          "systemMessage": "You are a formal email support assistant for GroMo Partner Support. You receive either product/profile/search API data or a fallback chat response, along with the GP's original query.\n\nCHECK FIRST: Look at the input data.\n- If fallback_used is false: use api_data and apply the relevant logic below.\n- If fallback_used is true: use chat_response as the basis for your reply. Format it professionally following the REPLY FORMAT RULES at the bottom.\n\nFOR PRODUCT QUERIES (use when api_data has product information):\n- Present product name, payout amount, and key benefits from the API data\n- If multiple products returned, list the most relevant ones based on the query\n- Include commission/payout amounts clearly\n\nFOR PROFILE QUERIES (use when api_data has profile information):\n- Present the requested profile information from the API data\n- For bank details change: Ask GP to share valid proof of new bank account (cancelled cheque, passbook or statement), copy of PAN card, and reason for update. Name in bank account must match PAN card.\n- For account deletion: First ask the reason. If they insist, guide them to Homepage > question mark icon > scroll down > account deactivation option.\n\nFOR PRODUCT SEARCH (use when api_data has search results):\n- Present matching products with payout amounts and whether they are currently active\n\nGENERAL INFORMATION:\n\nIF user asks about KYC process:\nReply: For first-time KYC, your wallet must have a minimum balance of Rs 400. Re-KYC requires minimum Rs 100 balance. You need to verify your Bank and PAN details only. The Gromo app provides 4 attempts for self-KYC. If all 4 fail, upload documents (PAN Card + Bank document with Account Number and IFSC visible) to verification support. Response within 24-48 hours.\n\nIF user asks how to connect with email support:\nReply: Open the GroMo App, tap the question mark icon in the top-right corner, select any option from the Help menu, scroll down the page, click on Ask Guru, type I want to connect with GroMo email support in the chat box, and Guru will show the email support button.\n\nIF user asks about insurance:\nReply: GroMo has discontinued insurance services. For existing insurance leads, Motor Insurance payout will go to your wallet and Life/Health Insurance payout will go to your registered bank account.\n\nREPLY FORMAT RULES (apply to ALL replies):\n- Always reply in English only\n- Start with Dear [name] or Dear GroMo Partner\n- End with: If you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n- Plain text only, no markdown, no bold, no asterisks\n- No subject line, body text only\n- Never mention system, API, automation, fallback or internal tools\n- Do not make up data. Only use what is provided in the input."
+        }
+      },
+      "id": "a4ffadeb-8751-49d4-99e0-f0316ffcb7be",
+      "name": "Reply General",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        672,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=GP Name: {{ $node['Webhook Trigger'].json.body.contact_name }}\nGP Email Subject: {{ $node['Webhook Trigger'].json.body.subject }}\nGP Email Body: {{ $node['Webhook Trigger'].json.body.description }}\nThread History: {{ $node['Webhook Trigger'].json.body.thread_history || 'None — new ticket' }}\nLanguage: {{ $json.output.language || 'english' }}\n\nWrite the L1 reply asking only for MISSING details — check thread history first.",
+        "options": {
+          "systemMessage": "===============================================\nBEFORE ASKING FOR DETAILS — CHECK THREAD HISTORY\n===============================================\nCheck the Thread History field carefully before asking for any info.\n\nIf thread history contains a GP Partner ID (like GP12345, M7XO3987, 3MFI5134) or a 10-digit mobile number already shared by the GP, DO NOT ask for it again.\n\n- If GP ID is in thread but phone is not: ask only for the phone\n- If phone is in thread but GP ID is not: ask only for the GP ID\n- If both are in thread: do NOT ask for either — reply acknowledging you have their details and will update shortly\n\nNEVER ask the GP for information they already provided in an earlier message in the same thread.\n\n===============================================\n\nYou are a formal email support assistant for GroMo Partner Support. The GP has sent a query but their GroMo Partner ID was not found in the email. You need their details to look up information.\n\nRULES:\n- Always reply in English only\n- Start with Dear [name] or Dear GroMo Partner\n- In the first line, specifically acknowledge what the user asked about. Reference the exact topic from their email. Examples: regarding your Kotak 811 payout query or regarding the KYC issue you mentioned or regarding your wallet withdrawal concern or regarding the lead you created for your customer. Do NOT use generic phrases like regarding your query or regarding your concern.\n- State clearly that you need the following to check their specific issue:\n  1. GroMo Partner ID (example: GP12345 or M7XO3987)\n  2. Registered Mobile Number\n  3. Customer Name (if their query is about a lead)\n  4. Product Name (if their query is about a lead)\n- Do NOT ask for Lead Creation Date or Lead ID. Most users do not know these.\n- If the user already mentioned a phone number in their email, acknowledge it and say you will check using that number but also request GP ID for faster resolution.\n- Keep it brief. Under 80 words.\n- End with: Once you share these details, we will check and update you at the earliest. If you have any questions or suggestions, feel free to contact us through this link: https://app.gromo.co.in/F3GD\nRegards, Team GroMo\n- Plain text only, no markdown, no bold, no asterisks\n- No subject line, body text only\n- NEVER use to assist you better or kindly or at the earliest convenience\n- Each reply must be unique to the user's query. Do not send template-like responses."
+        }
+      },
+      "id": "942dd65e-6f39-4457-8c4a-c197852b9757",
+      "name": "Generate Reply Ask Info",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -288,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "output",
+              "value": "Dear GroMo Partner,\n\nThank you for reaching out. Your concern is under review. Our team will update you shortly on your registered email.\n\nRegards,\nGroMo Support",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        128,
+        656
+      ],
+      "id": "b4cf97b7-0829-4552-9f28-e31a8029e7b1",
+      "name": "L2 Reply Insurance"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a2",
+              "name": "output",
+              "value": "Dear GroMo Partner,\n\nThank you for reaching out. Your concern is under review. Our team will update you shortly on your registered email.\n\nRegards,\nGroMo Support",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        128,
+        864
+      ],
+      "id": "00eb738f-2301-4881-85fa-13fc3cd60346",
+      "name": "L2 Reply POS NOC"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a3",
+              "name": "output",
+              "value": "Dear GroMo Partner,\n\nThank you for reaching out. Your concern is under review. Our team will update you shortly on your registered email.\n\nRegards,\nGroMo Support",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        128,
+        1056
+      ],
+      "id": "304b8b5e-126f-4646-b7e4-9497e90b4c86",
+      "name": "L2 Reply Account Delete"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "285b5e88-fb33-4455-957a-fed6ed180d93",
+              "name": "ticket_id",
+              "value": "={{ String($node['Webhook Trigger'].json.body.ticket_id).replace('TID_', '') }}",
+              "type": "string"
+            },
+            {
+              "id": "1af412e0-835b-47a2-b1b6-56a50bda3480",
+              "name": "contact_email",
+              "value": "={{ $node['Webhook Trigger'].json.body.contact_email }}",
+              "type": "string"
+            },
+            {
+              "id": "713e73df-2e09-4152-b483-319e6a91cb70",
+              "name": "reply_text",
+              "value": "={{ $json.output }}",
+              "type": "string"
+            },
+            {
+              "id": "intent-field-001",
+              "name": "intent",
+              "value": "={{ $node['Code in JavaScript1'].json.output.intent || 'unknown' }}",
+              "type": "string"
+            },
+            {
+              "id": "thread-count-field-001",
+              "name": "thread_count",
+              "value": "={{ $node['Webhook Trigger'].json.body.thread_count || '1' }}",
+              "type": "string"
+            },
+            {
+              "id": "4e9fe4a0-f8d5-4d69-9efa-0b33d3c5e5e1",
+              "name": "ticket_type",
+              "value": "={{ $node['Code in JavaScript1'].json.output.ticket_type || 'L1_Queries' }}",
+              "type": "string"
+            },
+            {
+              "id": "a1fdc9f9-23f6-4479-965b-38029106204d",
+              "name": "lead_id",
+              "value": "={{ $node['Code in JavaScript1'].json.output.lead_id || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "18c44900-5720-432d-a727-b7d8d0fb6451",
+              "name": "has_dispute",
+              "value": "={{ $node['Code in JavaScript1'].json.output.has_dispute || false }}",
+              "type": "string"
+            },
+            {
+              "id": "07d58245-6d1e-4b1b-a6e9-759aadcc7b57",
+              "name": "needs_l2_review",
+              "value": "={{ $node['Code in JavaScript1'].json.output.needs_l2_review || false }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        960,
+        -16
+      ],
+      "id": "a4b421b1-53c8-4fcf-a103-f19e180ae24f",
+      "name": "prepare reply data"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "skip-agent-001",
+              "name": "output",
+              "value": "SKIP_NO_REPLY",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        128,
+        1568
+      ],
+      "id": "89ea274e-0efd-49d4-91e1-50effa62e36c",
+      "name": "Skip — Agent Handled"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticketId = String($input.first().json.ticket_id);\nconst contactEmail = $input.first().json.contact_email;\nconst replyText = $input.first().json.reply_text || '';\nconst intent = $input.first().json.intent || '';\nconst threadCount = parseInt($input.first().json.thread_count || '1');\nconst ticketType = $input.first().json.ticket_type || 'L1_Queries';\nconst plainReply = replyText.replace(/\\\\n/g, '\\n').replace(/\\\\/g, '').trim();\n\n// Circuit breaker — if a ticket has more than 10 threads, something is wrong, never auto-reply\nconst threadCountCheck = parseInt($input.first().json.thread_count || '0');\nif (threadCountCheck > 10) {\n  return [{ json: { ticket_id: ticketId, skipped: true, reason: `runaway thread count ${threadCountCheck}, manual review required` } }];\n}\n\nconst TOKEN_BODY = 'grant_type=refresh_token&client_id=1000.QYFS4DHN3WWFOAUYV1X22URFZRV0NE&client_secret=7e728067dbb5598356b4fe393fd00b36fda8b26bd9&refresh_token=1000.70b2980e4bba4539eee6aa2a9a9e5eaf.d4388b2d3a2988d7ab453db2496d68bb';\n\nasync function getToken(ctx) {\n  const t = await ctx.helpers.httpRequest({\n    method: 'POST', url: 'https://accounts.zoho.com/oauth/v2/token',\n    headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: TOKEN_BODY\n  });\n  return t.access_token;\n}\n\n// 1. JUNK / NO-REPLY: auto-close\nconst junkPatterns = [\n  'customer.care@kotak.com','alerts@kotak.com','noreply@axisbank.com',\n  'tamanna.khanna@gromo.in','thisweekinfintech@mail.beehiiv.com',\n  'lenovo@ecomm.lenovo.com','aravind.jayakumar@c-zentrix.com',\n  'newsletter@bluestone.com','notifs@smallcase.com','mdcorporation1999@gmail.com'\n];\nconst emailLower = (contactEmail || '').toLowerCase();\nconst isNoReply = emailLower.includes('no-reply') || emailLower.includes('noreply');\nconst isJunk = junkPatterns.some(p => emailLower.includes(p.toLowerCase()));\n\nif (isNoReply || isJunk) {\n  const token = await getToken(this);\n  if (token) {\n    try {\n      await this.helpers.httpRequest({\n        method: 'PATCH',\n        url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId,\n        headers: {'Authorization': 'Zoho-oauthtoken ' + token, 'orgId': '702411223', 'Content-Type': 'application/json'},\n        body: { cf: { cf_type_of_ticket: 'Blank Email/ Junk/ Test' }, status: 'Closed' }\n      });\n    } catch (e) {}\n  }\n  return [{ json: { ticket_id: ticketId, skipped: true, closed: true, type_set: 'Blank Email/ Junk/ Test', reason: isNoReply ? 'no-reply email' : 'junk sender' } }];\n}\n\n// 2. SKIP_NO_REPLY\nif (replyText === 'SKIP_NO_REPLY' || replyText.includes('SKIP_NO_REPLY')) {\n  return [{ json: { ticket_id: ticketId, skipped: true, reason: 'agent already handling this ticket' } }];\n}\n\n// ============================================\n// 2b. ATTACHMENT ROUTING → L2 holding message\n// ============================================\nconst needsL2 = $input.first().json.needs_l2_review === 'true' || $input.first().json.needs_l2_review === true;\nif (needsL2) {\n  const token = await getToken(this);\n  if (!token) return [{ json: { error: 'Token refresh failed (L2 attachment route)' } }];\n  \n  const l2Message = \"Dear GroMo Partner,\\n\\nThank you for reaching out and sharing the documents. Our team will review them and update you on your registered email shortly.\\n\\nRegards,\\nGroMo Support\";\n  \n  // Fetch latest thread\n  let latestThreadId = null;\n  try {\n    const threadsResp = await this.helpers.httpRequest({\n      method: 'GET',\n      url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId + '/threads?limit=1',\n      headers: {'Authorization': 'Zoho-oauthtoken ' + token, 'orgId': '702411223'}\n    });\n    latestThreadId = threadsResp?.data?.[0]?.id;\n  } catch (e) {}\n  \n  try {\n    await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId + '/sendReply',\n      headers: {'Authorization': 'Zoho-oauthtoken ' + token, 'orgId': '702411223', 'Content-Type': 'application/json'},\n      body: {\n        fromEmailAddress: 'support@gromofintech.zohodesk.com',\n        to: contactEmail,\n        contentType: 'plainText',\n        content: l2Message,\n        channel: 'EMAIL'\n      }\n    });\n    \n    // Set ticket type but keep OPEN (attachment needs human review)\n    await this.helpers.httpRequest({\n      method: 'PATCH',\n      url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId,\n      headers: {'Authorization': 'Zoho-oauthtoken ' + token, 'orgId': '702411223', 'Content-Type': 'application/json'},\n      body: { cf: { cf_type_of_ticket: ticketType } }\n    });\n  } catch (e) {\n    return [{ json: { error: 'L2 attachment route failed', detail: e.message } }];\n  }\n  \n  return [{ json: { ticket_id: ticketId, routed_to: 'L2 (attachment)', kept_open: true, type_set: ticketType } }];\n}\n\n// 3. Get token\nconst accessToken = await getToken(this);\nif (!accessToken) return [{ json: { error: 'Token refresh failed' } }];\n\n// 4. Fetch latest thread ID for sendReply\nlet latestThreadId = null;\ntry {\n  const threadsResp = await this.helpers.httpRequest({\n    method: 'GET',\n    url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId + '/threads?limit=1',\n    headers: {'Authorization': 'Zoho-oauthtoken ' + accessToken, 'orgId': '702411223'}\n  });\n  latestThreadId = threadsResp?.data?.[0]?.id;\n} catch (e) {\n  return [{ json: { error: 'Could not fetch thread', detail: e.message } }];\n}\n\n// 5. SEND EMAIL REPLY (the actual fix — uses sendReply, not comments)\nlet replyResult = {};\ntry {\n  replyResult = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId + '/sendReply',\n    headers: {\n      'Authorization': 'Zoho-oauthtoken ' + accessToken, \n      'orgId': '702411223', \n      'Content-Type': 'application/json'\n    },\n    body: {\n      fromEmailAddress: 'support@gromofintech.zohodesk.com',\n      to: contactEmail,\n      contentType: 'plainText',\n      content: plainReply,\n      channel: 'EMAIL'\n    }\n  });\n} catch (e) {\n  return [{ json: { error: 'sendReply failed', detail: e.message, ticket_id: ticketId } }];\n}\n\n// 6. L2 detection\nconst isL2 = intent === 'insurance' || intent === 'pos_noc' || intent === 'account_delete';\n\n// 7. Set ticket type + close based on flow\nlet typeResult = {};\nlet closeResult = {};\ntry {\n  const patchBody = { cf: { cf_type_of_ticket: ticketType } };\n  if (!isL2) patchBody.status = 'Closed';\n  \n  await this.helpers.httpRequest({\n    method: 'PATCH',\n    url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId,\n    headers: {'Authorization': 'Zoho-oauthtoken ' + accessToken, 'orgId': '702411223', 'Content-Type': 'application/json'},\n    body: patchBody\n  });\n  typeResult = { type_set: ticketType, success: true };\n  closeResult = isL2 ? { skipped: 'L2 — kept Open' } : { closed: true };\n} catch (e) {\n  typeResult = { error: e.message };\n}\n\nreturn [{ json: {\n  ticket_id: ticketId,\n  reply_sent_to: contactEmail,\n  reply_content: plainReply,\n  intent: intent,\n  ticket_type: ticketType,\n  is_l2: isL2,\n  reply_result: replyResult,\n  type_result: typeResult,\n  close_result: closeResult\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -16
+      ],
+      "id": "deb60361-ca13-425c-bdaa-55fa8d523241",
+      "name": "Code in JavaScript",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst contactEmail = (body.contact_email || '').toLowerCase();\nconst subject = (body.subject || '').toLowerCase();\nconst description = (body.description || '').toLowerCase();\n\nconst bounceSenderPatterns = [\n  'mailer-daemon@', 'postmaster@', 'bounce@', 'bounces@',\n  'mailerdaemon@', 'noreply-daemon@', 'bounce-noreply@'\n];\nconst bounceSubjectPatterns = [\n  'delivery status notification', 'undeliverable', 'mail delivery failed',\n  'returned mail', 'failure notice', 'delivery failure', 'undelivered mail',\n  'mail delivery subsystem', 'out of office', 'auto-reply', 'automatic reply',\n  'autoreply'\n];\nconst bounceBodyPatterns = [\n  'this message was created automatically by mail delivery system',\n  'delivery to the following recipient failed',\n  'the following addresses had fatal errors',\n  'reporting-mta:', 'final-recipient:', 'diagnostic-code:',\n  'message will be retried', 'undelivered mail returned to sender',\n  'i am currently out of office', 'i am out of the office',\n  'this is an automated response'\n];\n\nconst isBounceSender = bounceSenderPatterns.some(p => contactEmail.includes(p));\nconst isBounceSubject = bounceSubjectPatterns.some(p => subject.includes(p));\nconst isBounceBody = bounceBodyPatterns.some(p => description.includes(p));\nconst bounceSignalCount = (isBounceSender ? 1 : 0) + (isBounceSubject ? 1 : 0) + (isBounceBody ? 1 : 0);\nconst isBounce = isBounceSender || bounceSignalCount >= 2;\n\nreturn [{\n  json: {\n    ...body,\n    body: body,\n    _bounceCheck: {\n      is_bounce: isBounce,\n      is_bounce_sender: isBounceSender,\n      is_bounce_subject: isBounceSubject,\n      is_bounce_body: isBounceBody,\n      reason: isBounce ? `bounce detected (sender=${isBounceSender}, subject=${isBounceSubject}, body=${isBounceBody})` : null\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        -256
+      ],
+      "id": "31ccb6d6-8070-4ffa-80f4-fcc253d60768",
+      "name": "Bounce Check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "078bbb72-1db3-4a6a-8e85-6571c9606966",
+              "leftValue": "={{ $json._bounceCheck.is_bounce }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1472,
+        -256
+      ],
+      "id": "6359b51b-16e5-470a-b6f3-fc5241af7ec2",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst ticketId = String(body.ticket_id || '').replace('TID_', '');\nconst reason = $input.first().json._bounceCheck?.reason || 'bounce detected';\n\nconst TOKEN_BODY = 'grant_type=refresh_token&client_id=1000.QYFS4DHN3WWFOAUYV1X22URFZRV0NE&client_secret=7e728067dbb5598356b4fe393fd00b36fda8b26bd9&refresh_token=1000.70b2980e4bba4539eee6aa2a9a9e5eaf.d4388b2d3a2988d7ab453db2496d68bb';\n\nconst tokenResp = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://accounts.zoho.com/oauth/v2/token',\n  headers: {'Content-Type': 'application/x-www-form-urlencoded'},\n  body: TOKEN_BODY\n});\n\ntry {\n  await this.helpers.httpRequest({\n    method: 'PATCH',\n    url: 'https://desk.zoho.com/api/v1/tickets/' + ticketId,\n    headers: {\n      'Authorization': 'Zoho-oauthtoken ' + tokenResp.access_token,\n      'orgId': '702411223',\n      'Content-Type': 'application/json'\n    },\n    body: { cf: { cf_type_of_ticket: 'Blank Email/ Junk/ Test' }, status: 'Closed' }\n  });\n} catch (e) {\n  return [{ json: { ticket_id: ticketId, error: e.message, reason: reason } }];\n}\n\nreturn [{ json: { ticket_id: ticketId, skipped: true, closed: true, type_set: 'Blank Email/ Junk/ Test', reason: reason } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        -512
+      ],
+      "id": "3c6869fa-4ff8-4382-a257-1c794a3b2c5c",
+      "name": "Close it as junk"
+    }
+  ],
+  "pinData": {
+    "Webhook Trigger": [
+      {
+        "json": {
+          "body": {
+            "ticket_id": "TID_400001",
+            "subject": "Payout not received",
+            "description": "Hi, my phonec number is 7669003987. I completed a Kotak 811 lead 15 days ago but payout is still not showing. Please check.",
+            "contact_name": "Rahul Sharma",
+            "contact_email": "khushijha229@gmail.com"
+          }
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Bounce Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Ticket Information": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Ticket Information",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Reply Payout Wallet",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Reply Payout Leads",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Reply Protect Membership",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Reply General",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate Reply Ask Info",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Has GP ID or Phone?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has GP ID or Phone?": {
+      "main": [
+        [
+          {
+            "node": "Lookup GP by Phone",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Reply Ask Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup GP by Phone": {
+      "main": [
+        [
+          {
+            "node": "Route by Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Intent": {
+      "main": [
+        [
+          {
+            "node": "Fetch Wallet Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Leads Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Products Catalog",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Membership Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch GP Profile",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Search Specific Product",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "L2 Reply Insurance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "L2 Reply POS NOC",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "L2 Reply Account Delete",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip — Agent Handled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip — Agent Handled": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Wallet Summary": {
+      "main": [
+        [
+          {
+            "node": "Wallet Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Leads Data": {
+      "main": [
+        [
+          {
+            "node": "Leads Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Products Catalog": {
+      "main": [
+        [
+          {
+            "node": "Products Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Membership Status": {
+      "main": [
+        [
+          {
+            "node": "Membership Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch GP Profile": {
+      "main": [
+        [
+          {
+            "node": "Profile Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Specific Product": {
+      "main": [
+        [
+          {
+            "node": "Search Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wallet Fallback": {
+      "main": [
+        [
+          {
+            "node": "Reply Payout Wallet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leads Fallback": {
+      "main": [
+        [
+          {
+            "node": "Calculate Lead Age",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Lead Age": {
+      "main": [
+        [
+          {
+            "node": "Reply Payout Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Products Fallback": {
+      "main": [
+        [
+          {
+            "node": "Reply General",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Membership Fallback": {
+      "main": [
+        [
+          {
+            "node": "Reply Protect Membership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Profile Fallback": {
+      "main": [
+        [
+          {
+            "node": "Reply General",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Fallback": {
+      "main": [
+        [
+          {
+            "node": "Reply General",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply Payout Wallet": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply Payout Leads": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply Protect Membership": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply General": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "L2 Reply Insurance": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "L2 Reply POS NOC": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "L2 Reply Account Delete": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Reply Ask Info": {
+      "main": [
+        [
+          {
+            "node": "prepare reply data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare reply data": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bounce Check": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Close it as junk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Ticket Information",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "361ef5c8-4c54-4bab-9614-359bbfb1c657",
+  "meta": {
+    "instanceId": "636396f02b6571e40d8fe91cba550515c0cdc0e7d314c210e00b02256375a796"
+  },
+  "id": "R0ILe2BDemSLC08o",
+  "tags": []
+}
